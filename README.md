@@ -1,0 +1,1 @@
+# opentelemetry-github-actions-junit-receiver
