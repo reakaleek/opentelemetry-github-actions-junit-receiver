@@ -6,6 +6,8 @@
 ### Prerequisites
 
 - [Go](https://golang.org/dl/)
+- [Gh](https://cli.github.com/)
+- [Ngrok](https://ngrok.com/download/)
 - [OpenTelemetry Collector Builder (OCB)](https://opentelemetry.io/docs/collector/custom-collector/#step-1---install-the-builder)
 
 ### Build the collector
@@ -14,12 +16,31 @@
 make build
 ```
 
+### Configure your GitHub repository for testing purposes
+
+Open one terminal and run
+
+```shell
+make ngrok
+```
+
+<img src="./docs/images/ngrok.png" width="512"/>
+
+Copy the `ngrok` URL and go to your GitHub repository, in this case we use `elastic/oblt-project-tmpl`:
+
+* https://github.com/elastic/oblt-project-tmpl/settings/hooks
+  * Payload: `https://3012-37-133-56-13.ngrok-free.app/githubactionsjunit` or the relevant `ngrok` URL
+  * Content type: `application/json`
+  * Secret: `secret` - fixed for now for testing purposes
+  * `Enable SSL verification`
+  * Individual events:
+    * Workflow runs
+    * Workflow jobs
+
+<img src="./docs/images/webhook.png" width="512"/>
+
 ### Run the collector
 
 ```shell
-make run WEBHOOK_SECRET=your-webhook-secret GITHUB_TOKEN=your-github-token
+make run
 ```
-
-### Configure your GitHub repository for testing purposes
-
-TBC
