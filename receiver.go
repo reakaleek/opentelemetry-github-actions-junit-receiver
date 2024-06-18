@@ -30,19 +30,21 @@ func newTracesReceiver(cfg *Config, params receiver.CreateSettings, nextConsumer
 	}
 	params.Logger.Info("GitHub API rate limit", zap.Int("limit", rateLimit.GetCore().Limit), zap.Int("remaining", rateLimit.GetCore().Remaining), zap.Time("reset", rateLimit.GetCore().Reset.Time))
 	return &githubactionsjunitReceiver{
-		config:   cfg,
-		settings: params,
-		logger:   params.Logger,
-		ghClient: ghClient,
+		nextConsumer: nextConsumer,
+		config:       cfg,
+		settings:     params,
+		logger:       params.Logger,
+		ghClient:     ghClient,
 	}, nil
 }
 
 type githubactionsjunitReceiver struct {
-	config   *Config
-	server   *http.Server
-	settings receiver.CreateSettings
-	logger   *zap.Logger
-	ghClient *github.Client
+	nextConsumer consumer.Traces
+	config       *Config
+	server       *http.Server
+	settings     receiver.CreateSettings
+	logger       *zap.Logger
+	ghClient     *github.Client
 }
 
 func (rec *githubactionsjunitReceiver) Start(ctx context.Context, host component.Host) error {
@@ -122,7 +124,7 @@ func (rec *githubactionsjunitReceiver) handleWorkflowRunEvent(workflowRunEvent *
 		return
 	}
 	for _, artifact := range junitArtifacts {
-		err := processArtifact(rec.logger, rec.ghClient, workflowRunEvent, artifact)
+		err := processArtifact(rec.logger, rec.ghClient, rec.config, workflowRunEvent, artifact, r.Context(), rec.nextConsumer)
 		if err != nil {
 			// TODO: report error but keep processing other artifacts
 			rec.logger.Error("Failed to process artifact", zap.Error(err))
@@ -133,7 +135,7 @@ func (rec *githubactionsjunitReceiver) handleWorkflowRunEvent(workflowRunEvent *
 	}
 }
 
-func processArtifact(logger *zap.Logger, ghClient *github.Client, workflowRunEvent *github.WorkflowRunEvent, artifact *github.Artifact) error {
+func processArtifact(logger *zap.Logger, ghClient *github.Client, config *Config, workflowRunEvent *github.WorkflowRunEvent, artifact *github.Artifact, ctx context.Context, nextConsumer consumer.Traces) error {
 	zipFile, err := downloadArtifact(context.Background(), ghClient, workflowRunEvent, artifact)
 	if err != nil {
 		return err
@@ -144,6 +146,27 @@ func processArtifact(logger *zap.Logger, ghClient *github.Client, workflowRunEve
 		suites := processJunitFile(file, logger)
 		for _, suite := range suites {
 			processSuite(suite, logger)
+		}
+		// Convert the GitHub event to OpenTelemetry traces
+		td, err := suitesToTraces(suites, workflowRunEvent, config, logger)
+		if err != nil {
+			logger.Debug("Failed to convert event to traces", zap.Error(err))
+			// Move forward with the next file
+		}
+
+		// Check if the traces data contains any ResourceSpans
+		if td.ResourceSpans().Len() > 0 {
+			spanCount := td.SpanCount()
+			logger.Debug("Unmarshaled spans", zap.Int("#spans", spanCount))
+			td.ResourceSpans()
+
+			// TODO: Pass the traces to the nextConsumer
+			consumerErr := nextConsumer.ConsumeTraces(ctx, td)
+			if consumerErr != nil {
+				logger.Debug("Failed to process traces", zap.Error(consumerErr))
+			}
+		} else {
+			logger.Debug("No spans to unmarshal or traces not initialized")
 		}
 	}
 	return nil
@@ -211,7 +234,7 @@ func processSuite(suite junit.Suite, logger *zap.Logger) {
 		for _, attr := range testAttributes {
 			stringSlice = append(stringSlice, fmt.Sprintf("%s: %v", attr.Key, attr.Value.AsString()))
 		}
-		logger.Debug("Processing test suite", zap.Strings("attributes", stringSlice))
+		//logger.Debug("Processing test suite", zap.Strings("attributes", stringSlice))
 	}
 }
 
