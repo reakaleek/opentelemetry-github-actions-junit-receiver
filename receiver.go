@@ -18,7 +18,6 @@ import (
 	"go.opentelemetry.io/collector/consumer"
 	"go.opentelemetry.io/collector/receiver"
 	"go.opentelemetry.io/otel/attribute"
-	semconv "go.opentelemetry.io/otel/semconv/v1.4.0"
 	"go.uber.org/zap"
 )
 
@@ -122,7 +121,7 @@ func (rec *githubactionsjunitReceiver) handleWorkflowRunEvent(workflowRunEvent *
 		return
 	}
 	for _, artifact := range junitArtifacts {
-		err := processArtifact(rec.logger, rec.ghClient, workflowRunEvent, artifact)
+		err := processArtifact(rec.logger, rec.ghClient, workflowRunEvent, rec.config, artifact)
 		if err != nil {
 			// TODO: report error but keep processing other artifacts
 			rec.logger.Error("Failed to process artifact", zap.Error(err))
@@ -133,7 +132,7 @@ func (rec *githubactionsjunitReceiver) handleWorkflowRunEvent(workflowRunEvent *
 	}
 }
 
-func processArtifact(logger *zap.Logger, ghClient *github.Client, workflowRunEvent *github.WorkflowRunEvent, artifact *github.Artifact) error {
+func processArtifact(logger *zap.Logger, ghClient *github.Client, workflowRunEvent *github.WorkflowRunEvent, config *Config, artifact *github.Artifact) error {
 	zipFile, err := downloadArtifact(context.Background(), ghClient, workflowRunEvent, artifact)
 	if err != nil {
 		return err
@@ -142,9 +141,7 @@ func processArtifact(logger *zap.Logger, ghClient *github.Client, workflowRunEve
 	for _, file := range zipFile.Reader.File {
 		logger.Debug("Processing file", zap.String("artifact", artifact.GetName()), zap.String("file", file.Name))
 		suites := processJunitFile(file, logger)
-		for _, suite := range suites {
-			processSuite(suite, logger)
-		}
+		processSuites(suites, workflowRunEvent, config, logger)
 	}
 	return nil
 }
@@ -175,43 +172,37 @@ func processJunitFile(file *zip.File, logger *zap.Logger) []junit.Suite {
 	return suites
 }
 
-func processSuite(suite junit.Suite, logger *zap.Logger) {
-
-	// Set up the attributes for the suite
-	suiteAttributes := []attribute.KeyValue{
-		semconv.CodeNamespaceKey.String(suite.Package),
-		attribute.Key(TestsSuiteName).String(suite.Name),
-		attribute.Key(TestsSystemErr).String(suite.SystemErr),
-		attribute.Key(TestsSystemOut).String(suite.SystemOut),
-		attribute.Key(TestsDuration).Int64(suite.Totals.Duration.Milliseconds()),
+func processSuites(suites []junit.Suite, workflowRunEvent *github.WorkflowRunEvent, config *Config, logger *zap.Logger) {
+	// Convert the Suites to OpenTelemetry traces
+	td, err := suitesToTraces(suites, workflowRunEvent, config, logger)
+	if err != nil {
+		logger.Debug("Failed to convert event to traces", zap.Error(err))
 	}
+	// Check if the traces data contains any ResourceSpans
+	if td.ResourceSpans().Len() > 0 {
+		spanCount := td.SpanCount()
+		logger.Debug("Unmarshaled spans", zap.Int("#spans", spanCount))
 
-	// Add suite properties as labels
-	suiteAttributes = append(suiteAttributes, propsToLabels(suite.Properties)...)
+		// TODO: Pass the traces to the nextConsumer
+	} else {
+		logger.Debug("No spans to unmarshal or traces not initialized")
+	}
+}
 
-	// For each test in the suite, set up the attributes
-	for _, test := range suite.Tests {
-		testAttributes := []attribute.KeyValue{
-			semconv.CodeFunctionKey.String(test.Name),
-			attribute.Key(TestDuration).Int64(test.Duration.Milliseconds()),
-			attribute.Key(TestClassName).String(test.Classname),
-			attribute.Key(TestMessage).String(test.Message),
-			attribute.Key(TestStatus).String(string(test.Status)),
-			attribute.Key(TestSystemErr).String(test.SystemErr),
-			attribute.Key(TestSystemOut).String(test.SystemOut),
-		}
+func processSuite(suite junit.Suite, workflowRunEvent *github.WorkflowRunEvent, config *Config, logger *zap.Logger) {
+	// Convert the Suites to OpenTelemetry traces
+	td, err := suiteToTraces(suite, workflowRunEvent, config, logger)
+	if err != nil {
+		logger.Debug("Failed to convert event to traces", zap.Error(err))
+	}
+	// Check if the traces data contains any ResourceSpans
+	if td.ResourceSpans().Len() > 0 {
+		spanCount := td.SpanCount()
+		logger.Debug("Unmarshaled spans", zap.Int("#spans", spanCount))
 
-		testAttributes = append(testAttributes, propsToLabels(test.Properties)...)
-		testAttributes = append(testAttributes, suiteAttributes...)
-
-		if test.Error != nil {
-			testAttributes = append(testAttributes, attribute.Key(TestError).String(test.Error.Error()))
-		}
-		var stringSlice []string
-		for _, attr := range testAttributes {
-			stringSlice = append(stringSlice, fmt.Sprintf("%s: %v", attr.Key, attr.Value.AsString()))
-		}
-		logger.Debug("Processing test suite", zap.Strings("attributes", stringSlice))
+		// TODO: Pass the traces to the nextConsumer
+	} else {
+		logger.Debug("No spans to unmarshal or traces not initialized")
 	}
 }
 
