@@ -17,7 +17,6 @@ import (
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/consumer"
 	"go.opentelemetry.io/collector/receiver"
-	"go.opentelemetry.io/otel/attribute"
 	"go.uber.org/zap"
 )
 
@@ -187,32 +186,6 @@ func processSuites(suites []junit.Suite, workflowRunEvent *github.WorkflowRunEve
 	} else {
 		logger.Debug("No spans to unmarshal or traces not initialized")
 	}
-}
-
-func processSuite(suite junit.Suite, workflowRunEvent *github.WorkflowRunEvent, config *Config, logger *zap.Logger) {
-	// Convert the Suites to OpenTelemetry traces
-	td, err := suiteToTraces(suite, workflowRunEvent, config, logger)
-	if err != nil {
-		logger.Debug("Failed to convert event to traces", zap.Error(err))
-	}
-	// Check if the traces data contains any ResourceSpans
-	if td.ResourceSpans().Len() > 0 {
-		spanCount := td.SpanCount()
-		logger.Debug("Unmarshaled spans", zap.Int("#spans", spanCount))
-
-		// TODO: Pass the traces to the nextConsumer
-	} else {
-		logger.Debug("No spans to unmarshal or traces not initialized")
-	}
-}
-
-func propsToLabels(props map[string]string) []attribute.KeyValue {
-	attributes := []attribute.KeyValue{}
-	for k, v := range props {
-		attributes = append(attributes, attribute.Key(k).String(v))
-	}
-
-	return attributes
 }
 
 func getArtifacts(ctx context.Context, ghEvent *github.WorkflowRunEvent, ghClient *github.Client) ([]*github.Artifact, error) {

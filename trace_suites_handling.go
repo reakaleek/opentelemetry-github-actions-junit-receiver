@@ -11,8 +11,7 @@ import (
 	"go.uber.org/zap"
 )
 
-// TODO: probably we can use the []suites instead
-func suitesToTraces(suite junit.Suite, event *github.WorkflowRunEvent, config *Config, logger *zap.Logger) (ptrace.Traces, error) {
+func suitesToTraces(suites []junit.Suite, event *github.WorkflowRunEvent, config *Config, logger *zap.Logger) (ptrace.Traces, error) {
 	traces := ptrace.NewTraces()
 	resourceSpans := traces.ResourceSpans().AppendEmpty()
 	runResource := resourceSpans.Resource()
@@ -25,11 +24,14 @@ func suitesToTraces(suite junit.Suite, event *github.WorkflowRunEvent, config *C
 	}
 
 	createResourceAttributes(runResource, event, config, logger)
-	// TODO: use the status from the suite object
+	// TODO: use the status from the suites object
 	createRootSpan(resourceSpans, event, traceID, logger)
 
-	parentSpanID := createParentSpan(scopeSpans, suite, event.GetWorkflowRun(), traceID, logger)
-	processTests(scopeSpans, suite, event.GetWorkflowRun(), traceID, parentSpanID, logger)
+	// For each suite, create a parent span and the test spans.
+	for _, suite := range suites {
+		parentSpanID := createParentSpan(scopeSpans, suite, event.GetWorkflowRun(), traceID, logger)
+		processTests(scopeSpans, suite, event.GetWorkflowRun(), traceID, parentSpanID, logger)
+	}
 
 	return traces, nil
 }
@@ -51,6 +53,7 @@ func createRootSpan(resourceSpans ptrace.ResourceSpans, event *github.WorkflowRu
 	span.SetKind(ptrace.SpanKindServer)
 	setSpanTimes(span, event.GetWorkflowRun().GetRunStartedAt().Time, event.GetWorkflowRun().GetUpdatedAt().Time)
 
+	// QUESTION: Status for the workflow run event or the Test Results?
 	switch event.WorkflowRun.GetConclusion() {
 	case "success":
 		span.Status().SetCode(ptrace.StatusCodeOk)
@@ -80,7 +83,7 @@ func createRootSpan(resourceSpans ptrace.ResourceSpans, event *github.WorkflowRu
 }
 
 func createParentSpan(scopeSpans ptrace.ScopeSpans, suite junit.Suite, run *github.WorkflowRun, traceID pcommon.TraceID, logger *zap.Logger) pcommon.SpanID {
-	logger.Debug("Creating parent span", zap.String("name", run.GetName()))
+	logger.Debug("Creating parent span", zap.String("name", run.GetName()), zap.String("test-suite", suite.Name), zap.String("test-package", suite.Package))
 	span := scopeSpans.Spans().AppendEmpty()
 	span.SetTraceID(traceID)
 
@@ -90,7 +93,7 @@ func createParentSpan(scopeSpans ptrace.ScopeSpans, suite junit.Suite, run *gith
 	jobSpanID, _ := generateJobSpanID(*run.ID, int(*run.RunAttempt), *run.Name)
 	span.SetSpanID(jobSpanID)
 
-	// TODO: package + name?
+	// QUESTION: package + name?
 	span.SetName(suite.Name)
 	span.SetKind(ptrace.SpanKindInternal)
 
@@ -121,7 +124,7 @@ func createParentSpan(scopeSpans ptrace.ScopeSpans, suite junit.Suite, run *gith
 }
 
 func createTestSpan(scopeSpans ptrace.ScopeSpans, test junit.Test, run *github.WorkflowRun, traceID pcommon.TraceID, parentSpanID pcommon.SpanID, logger *zap.Logger, stepNumber ...int) pcommon.SpanID {
-	logger.Debug("Processing span", zap.String("test_name", test.Name))
+	logger.Debug("Processing span", zap.String("test_name", test.Name), zap.String("test-package", test.Classname))
 	span := scopeSpans.Spans().AppendEmpty()
 	span.SetTraceID(traceID)
 	span.SetParentSpanID(parentSpanID)
@@ -145,9 +148,11 @@ func createTestSpan(scopeSpans ptrace.ScopeSpans, test junit.Test, run *github.W
 	// TODO: set span time
 	//setSpanTimes(span, step.GetStartedAt().Time, step.GetCompletedAt().Time)
 
+	// QUESTION: Classname + name?
 	span.SetName(test.Name)
 	span.SetKind(ptrace.SpanKindInternal)
 
+	// QUESTION: skipped = ptrace.StatusCodeUnset?
 	switch test.Status {
 	case "passed":
 		span.Status().SetCode(ptrace.StatusCodeOk)

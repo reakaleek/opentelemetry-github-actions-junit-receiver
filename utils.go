@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"go.opentelemetry.io/collector/pdata/pcommon"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 func convertPRURL(apiURL string) string {
@@ -80,4 +81,13 @@ func generateParentSpanID(runID int64, runAttempt int) (pcommon.SpanID, error) {
 	}
 
 	return spanID, nil
+}
+
+func propsToLabels(props map[string]string) []attribute.KeyValue {
+	attributes := []attribute.KeyValue{}
+	for k, v := range props {
+		attributes = append(attributes, attribute.Key(k).String(v))
+	}
+
+	return attributes
 }
