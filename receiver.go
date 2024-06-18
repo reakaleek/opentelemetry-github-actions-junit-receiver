@@ -160,7 +160,6 @@ func processArtifact(logger *zap.Logger, ghClient *github.Client, config *Config
 			logger.Debug("Unmarshaled spans", zap.Int("#spans", spanCount))
 			td.ResourceSpans()
 
-			// TODO: Pass the traces to the nextConsumer
 			consumerErr := nextConsumer.ConsumeTraces(ctx, td)
 			if consumerErr != nil {
 				logger.Debug("Failed to process traces", zap.Error(consumerErr))
