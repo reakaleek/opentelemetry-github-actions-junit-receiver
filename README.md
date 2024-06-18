@@ -11,11 +11,15 @@
 ### Build the collector
 
 ```shell
-ocb --config builder-config.yml
+make build
 ```
 
 ### Run the collector
 
 ```shell
-./bin/otelcol-custom --config config.yml
+make run WEBHOOK_SECRET=your-webhook-secret GITHUB_TOKEN=your-github-token
 ```
+
+### Configure your GitHub repository for testing purposes
+
+TBC
