@@ -1,0 +1,29 @@
+receivers:
+  githubactionsjunit:
+  otlp:
+    protocols:
+      grpc:
+      http:
+
+processors:
+  batch:
+
+extensions:
+  pprof:
+  zpages:
+    endpoint: "localhost:55679"
+
+exporters:
+  debug:
+    verbosity: basic
+
+service:
+  extensions: [zpages, pprof]
+  pipelines:
+    traces:
+      receivers: [githubactionsjunit]
+      processors: [batch]
+      exporters: [debug]
+  telemetry:
+    logs:
+      level: debug
