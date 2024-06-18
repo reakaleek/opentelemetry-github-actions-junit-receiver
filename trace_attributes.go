@@ -8,7 +8,6 @@ import (
 	"github.com/joshdk/go-junit"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	semconv "go.opentelemetry.io/otel/semconv/v1.25.0"
-	"go.uber.org/zap"
 )
 
 func createResourceAttributesTestSuite(resource pcommon.Resource, suite junit.Suite, config *Config) {
@@ -35,7 +34,7 @@ func createResourceAttributesTest(resource pcommon.Resource, test junit.Test, co
 	}
 }
 
-func createResourceAttributes(resource pcommon.Resource, e *github.WorkflowRunEvent, config *Config, logger *zap.Logger) {
+func createResourceAttributes(resource pcommon.Resource, e *github.WorkflowRunEvent, config *Config) {
 	attrs := resource.Attributes()
 
 	serviceName := generateServiceName(config, e.GetRepo().GetFullName())

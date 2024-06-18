@@ -16,6 +16,9 @@ func suitesToTraces(suites []junit.Suite, e *github.WorkflowRunEvent, config *Co
 	traces := ptrace.NewTraces()
 	resourceSpans := traces.ResourceSpans().AppendEmpty()
 	runResource := resourceSpans.Resource()
+	scopeSpans := resourceSpans.ScopeSpans().AppendEmpty()
+	suiteResource := resourceSpans.Resource()
+
 	logger.Info("Processing WorkflowRunEvent", zap.Int64("workflow_id", e.GetWorkflowRun().GetID()), zap.String("workflow_name", e.GetWorkflowRun().GetName()), zap.String("repo", e.GetRepo().GetFullName()))
 
 	traceID, err := generateTraceID(e.GetWorkflowRun().GetID(), e.GetWorkflowRun().GetRunAttempt())
@@ -24,8 +27,23 @@ func suitesToTraces(suites []junit.Suite, e *github.WorkflowRunEvent, config *Co
 		return ptrace.Traces{}, fmt.Errorf("failed to generate trace ID: %w", err)
 	}
 
-	createResourceAttributes(runResource, e, config, logger)
+	createResourceAttributes(runResource, e, config)
 	createRootSpan(resourceSpans, e, traceID, logger)
+
+	for _, suite := range suites {
+		createResourceAttributesTestSuite(suiteResource, suite, config)
+
+		traceID, err := generateTraceID(*e.WorkflowRun.ID, int(*e.WorkflowRun.RunAttempt))
+		if err != nil {
+			// QUESTION: Should we return an error here?
+			logger.Error("Failed to generate trace ID", zap.Error(err))
+			return ptrace.Traces{}, fmt.Errorf("failed to generate trace ID: %w", err)
+		}
+
+		createParentSpan(scopeSpans, suite, e, traceID, logger)
+
+		// TODO: create child spans for each test case
+	}
 
 	return traces, nil
 }
@@ -75,62 +93,37 @@ func createRootSpan(resourceSpans ptrace.ResourceSpans, event *github.WorkflowRu
 	return rootSpanID, nil
 }
 
-func createSpan(scopeSpans ptrace.ScopeSpans, step *github.TaskStep, job *github.WorkflowJob, traceID pcommon.TraceID, parentSpanID pcommon.SpanID, logger *zap.Logger, stepNumber ...int) pcommon.SpanID {
-	logger.Debug("Processing span", zap.String("step_name", step.GetName()))
+func createParentSpan(scopeSpans ptrace.ScopeSpans, suite junit.Suite, event *github.WorkflowRunEvent, traceID pcommon.TraceID, logger *zap.Logger) pcommon.SpanID {
+	logger.Debug("Creating parent span", zap.String("name", string(*event.WorkflowRun.Name)))
 	span := scopeSpans.Spans().AppendEmpty()
 	span.SetTraceID(traceID)
+
+	parentSpanID, _ := generateParentSpanID(*event.WorkflowRun.ID, int(*event.WorkflowRun.RunAttempt))
 	span.SetParentSpanID(parentSpanID)
 
-	var spanID pcommon.SpanID
+	jobSpanID, _ := generateJobSpanID(*event.WorkflowRun.ID, int(*event.WorkflowRun.RunAttempt), *event.GetWorkflowRun().Name)
+	span.SetSpanID(jobSpanID)
 
-	span.Attributes().PutStr("ci.github.workflow.job.step.name", step.GetName())
-	span.Attributes().PutStr("ci.github.workflow.job.step.status", step.GetStatus())
-	span.Attributes().PutStr("ci.github.workflow.job.step.conclusion", step.GetConclusion())
-	if len(stepNumber) > 0 && stepNumber[0] > 0 {
-		spanID, _ = generateStepSpanID(job.GetRunID(), int(job.GetRunAttempt()), job.GetName(), step.GetName(), stepNumber[0])
-		span.Attributes().PutInt("ci.github.workflow.job.step.number", int64(stepNumber[0]))
-	} else {
-		spanID, _ = generateStepSpanID(job.GetRunID(), int(job.GetRunAttempt()), job.GetName(), step.GetName())
-		span.Attributes().PutInt("ci.github.workflow.job.step.number", step.GetNumber())
-	}
-
-	span.SetSpanID(spanID)
-
-	// Set completed_at to same as started_at if ""
-	// GitHub emits zero values sometimes
-	if step.GetCompletedAt().IsZero() {
-		step.CompletedAt = step.StartedAt
-	}
-	span.Attributes().PutStr("ci.github.workflow.job.step.started_at", step.GetStartedAt().Format(time.RFC3339))
-	span.Attributes().PutStr("ci.github.workflow.job.step.completed_at", step.GetCompletedAt().Format(time.RFC3339))
-	setSpanTimes(span, step.GetStartedAt().Time, step.GetCompletedAt().Time)
-
-	span.SetName(step.GetName())
+	span.SetName(string(*event.WorkflowRun.Name))
 	span.SetKind(ptrace.SpanKindInternal)
 
-	switch step.GetConclusion() {
-	case "success":
-		span.Status().SetCode(ptrace.StatusCodeOk)
-	case "failure":
-		span.Status().SetCode(ptrace.StatusCodeError)
-	default:
-		span.Status().SetCode(ptrace.StatusCodeUnset)
-	}
+	// TODO: set span time
+	setSpanTimes(span, event.GetWorkflowRun().GetRunStartedAt().Time, event.GetWorkflowRun().GetUpdatedAt().Time)
 
-	span.Status().SetMessage(step.GetConclusion())
-
-	return span.SpanID()
-}
-
-func processSteps(scopeSpans ptrace.ScopeSpans, steps []*github.TaskStep, job *github.WorkflowJob, traceID pcommon.TraceID, parentSpanID pcommon.SpanID, logger *zap.Logger) {
-	nameCount := checkDuplicateStepNames(steps)
-	for index, step := range steps {
-		if nameCount[step.GetName()] > 1 {
-			createSpan(scopeSpans, step, job, traceID, parentSpanID, logger, index+1) // Pass step number if duplicate names exist
-		} else {
-			createSpan(scopeSpans, step, job, traceID, parentSpanID, logger)
+	anyFailure := false
+	for _, test := range suite.Tests {
+		if test.Error != nil {
+			anyFailure = true
 		}
 	}
+	// QUESTION: what status if any skipped tests?
+	if anyFailure {
+		span.Status().SetCode(ptrace.StatusCodeError)
+	} else {
+		span.Status().SetCode(ptrace.StatusCodeOk)
+	}
+
+	return span.SpanID()
 }
 
 func setSpanTimes(span ptrace.Span, start, end time.Time) {
