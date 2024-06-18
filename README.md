@@ -7,8 +7,24 @@
 
 - [Go](https://golang.org/dl/)
 - [Gh](https://cli.github.com/)
-- [Ngrok](https://ngrok.com/download/)
-- [OpenTelemetry Collector Builder (OCB)](https://opentelemetry.io/docs/collector/custom-collector/#step-1---install-the-builder)
+
+### Install tools
+
+#### Ngrok
+
+The [Ngrok](https://ngrok.com/download/) can be installed by running:
+
+```shell
+make install-ngrok
+```
+
+#### ocb
+
+The [OpenTelemetry Collector Builder (OCB)](https://opentelemetry.io/docs/collector/custom-collector/#step-1---install-the-builder) can be installed by running:
+
+```shell
+make install-ocb
+```
 
 ### Build the collector
 
