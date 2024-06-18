@@ -13,14 +13,23 @@ import (
 	"go.uber.org/zap"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 )
 
 func newTracesReceiver(cfg *Config, params receiver.CreateSettings, nextConsumer consumer.Traces) (receiver.Traces, error) {
+	ghClient := github.NewClient(nil).WithAuthToken(string(cfg.Token))
+	rateLimit, _, err := ghClient.RateLimit.Get(context.Background())
+	if err != nil {
+		return nil, err
+	}
+	params.Logger.Info("GitHub API rate limit", zap.Int("limit", rateLimit.GetCore().Limit), zap.Int("remaining", rateLimit.GetCore().Remaining), zap.Time("reset", rateLimit.GetCore().Reset.Time))
 	return &githubactionsjunitReceiver{
 		config:   cfg,
 		settings: params,
 		logger:   params.Logger,
+		ghClient: ghClient,
 	}, nil
 }
 
@@ -29,6 +38,7 @@ type githubactionsjunitReceiver struct {
 	server   *http.Server
 	settings receiver.CreateSettings
 	logger   *zap.Logger
+	ghClient *github.Client
 }
 
 func (rec *githubactionsjunitReceiver) Start(ctx context.Context, host component.Host) error {
@@ -39,9 +49,7 @@ func (rec *githubactionsjunitReceiver) Start(ctx context.Context, host component
 		return err
 	}
 	router := httprouter.New()
-	router.POST(rec.config.Path, func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
-		w.WriteHeader(200)
-	})
+	router.POST(rec.config.Path, rec.handleEvent)
 	rec.server, err = rec.config.ServerConfig.ToServer(ctx, host, rec.settings.TelemetrySettings, router)
 	if err != nil {
 		return err
@@ -85,15 +93,14 @@ func (rec *githubactionsjunitReceiver) handleEvent(w http.ResponseWriter, r *htt
 }
 
 func (rec *githubactionsjunitReceiver) handleWorkflowRunEvent(workflowRunEvent *github.WorkflowRunEvent, w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
-	rec.logger.Debug("Handling workflow run event", zap.Any("event", workflowRunEvent))
+	rec.logger.Debug("Handling workflow run event", zap.Int64("workflow_run.id", workflowRunEvent.WorkflowRun.GetWorkflowID()))
 	if workflowRunEvent.GetAction() != "completed" {
 		rec.logger.Debug("Skipping the request because it is not a completed workflow_job event", zap.Any("event", workflowRunEvent))
 		w.WriteHeader(http.StatusOK)
 		return
 	}
-	ghClient := github.NewClient(nil).WithAuthToken(string(rec.config.Token))
 
-	artifacts, err := getArtifacts(context.Background(), workflowRunEvent, ghClient)
+	artifacts, err := getArtifacts(context.Background(), workflowRunEvent, rec.ghClient)
 	if err != nil {
 		rec.logger.Error("Failed to get workflow artifacts", zap.Error(err))
 		w.WriteHeader(http.StatusInternalServerError)
@@ -110,6 +117,28 @@ func (rec *githubactionsjunitReceiver) handleWorkflowRunEvent(workflowRunEvent *
 		w.WriteHeader(http.StatusOK)
 		return
 	}
+	for _, artifact := range junitArtifacts {
+		err := processArtifact(rec.logger, rec.ghClient, workflowRunEvent, artifact)
+		if err != nil {
+			rec.logger.Error("Failed to process artifact", zap.Error(err))
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+	}
+}
+
+func processArtifact(logger *zap.Logger, ghClient *github.Client, workflowRunEvent *github.WorkflowRunEvent, artifact *github.Artifact) error {
+	zipFile, err := downloadArtifact(context.Background(), ghClient, workflowRunEvent, artifact)
+	if err != nil {
+		return err
+	}
+	defer zipFile.Close()
+	for _, file := range zipFile.Reader.File {
+		fileName := file.Name
+		logger.Debug("Processing file", zap.String("artifact", artifact.GetName()), zap.String("file", fileName))
+	}
+	return nil
 }
 
 func getArtifacts(ctx context.Context, ghEvent *github.WorkflowRunEvent, ghClient *github.Client) ([]*github.Artifact, error) {
@@ -131,18 +160,29 @@ func getArtifacts(ctx context.Context, ghEvent *github.WorkflowRunEvent, ghClien
 	return allArtifacts, nil
 }
 
-func downloadArtifact(ctx context.Context, ghClient *github.Client, owner string, repo string, artifact *github.Artifact) (*zip.ReadCloser, error) {
-	// TODO
-	_, _, err := ghClient.Actions.DownloadArtifact(ctx, owner, repo, artifact.GetID(), 3)
+func downloadArtifact(ctx context.Context, ghClient *github.Client, event *github.WorkflowRunEvent, artifact *github.Artifact) (*zip.ReadCloser, error) {
+	workflowRun := event.GetWorkflowRun()
+	url, _, err := ghClient.Actions.DownloadArtifact(ctx, event.GetRepo().GetOwner().GetLogin(), event.GetRepo().GetName(), artifact.GetID(), 3)
 	if err != nil {
 		return nil, fmt.Errorf("failed to download artifact: %w", err)
 	}
-
-	return nil, nil
-	//
-	//return fetchArtifact(ghClient.Client(), url.String()), nil
-	//
-	//return artifact, nil
+	filename := fmt.Sprintf("%s-%d-%d.zip", artifact.GetName(), workflowRun.ID, workflowRun.GetRunStartedAt().Unix())
+	fp := filepath.Join(os.TempDir(), "run-artifacts", filename)
+	response, err := fetchArtifact(http.DefaultClient, url.String())
+	if err != nil {
+		return nil, err
+	}
+	err = os.MkdirAll(filepath.Dir(fp), 0755)
+	if err != nil {
+		return nil, err
+	}
+	f, err := os.Create(fp)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	_, err = io.Copy(f, response)
+	return zip.OpenReader(fp)
 }
 
 func fetchArtifact(httpClient *http.Client, logURL string) (io.ReadCloser, error) {
