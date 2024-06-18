@@ -15,7 +15,7 @@ func suitesToTraces(suites []junit.Suite, e *github.WorkflowRunEvent, config *Co
 	logger.Debug("Determining event")
 	traces := ptrace.NewTraces()
 	resourceSpans := traces.ResourceSpans().AppendEmpty()
-
+	runResource := resourceSpans.Resource()
 	logger.Info("Processing WorkflowRunEvent", zap.Int64("workflow_id", e.GetWorkflowRun().GetID()), zap.String("workflow_name", e.GetWorkflowRun().GetName()), zap.String("repo", e.GetRepo().GetFullName()))
 
 	traceID, err := generateTraceID(e.GetWorkflowRun().GetID(), e.GetWorkflowRun().GetRunAttempt())
@@ -24,7 +24,7 @@ func suitesToTraces(suites []junit.Suite, e *github.WorkflowRunEvent, config *Co
 		return ptrace.Traces{}, fmt.Errorf("failed to generate trace ID: %w", err)
 	}
 
-	//createResourceAttributes(runResource, e, config, logger)
+	createResourceAttributes(runResource, e, config, logger)
 	createRootSpan(resourceSpans, e, traceID, logger)
 
 	return traces, nil
