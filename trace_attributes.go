@@ -7,6 +7,7 @@ import (
 	"github.com/google/go-github/v62/github"
 	"github.com/joshdk/go-junit"
 	"go.opentelemetry.io/collector/pdata/pcommon"
+	"go.opentelemetry.io/collector/pdata/ptrace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.25.0"
 )
 
@@ -20,18 +21,16 @@ func createResourceAttributesTestSuite(resource pcommon.Resource, suite junit.Su
 	attrs.PutInt("tests.suite.duration", suite.Totals.Duration.Milliseconds())
 }
 
-func createResourceAttributesTest(resource pcommon.Resource, test junit.Test, config *Config) {
-	attrs := resource.Attributes()
-	attrs.PutStr("service.name", "junit")
-	attrs.PutInt("tests.case.duration", test.Duration.Milliseconds())
-	attrs.PutStr(string(semconv.CodeFunctionKey), test.Name)
-	attrs.PutStr("tests.case.classname", test.Classname)
-	attrs.PutStr("tests.case.message", test.Message)
-	attrs.PutStr("tests.case.status", string(test.Status))
-	attrs.PutStr("tests.case.systemerr", test.SystemErr)
-	attrs.PutStr("tests.case.systemout", test.SystemOut)
+func createResourceAttributesTest(span ptrace.Span, test junit.Test) {
+	span.Attributes().PutInt("tests.case.duration", test.Duration.Milliseconds())
+	span.Attributes().PutStr(string(semconv.CodeFunctionKey), test.Name)
+	span.Attributes().PutStr("tests.case.classname", test.Classname)
+	span.Attributes().PutStr("tests.case.message", test.Message)
+	span.Attributes().PutStr("tests.case.status", string(test.Status))
+	span.Attributes().PutStr("tests.case.systemerr", test.SystemErr)
+	span.Attributes().PutStr("tests.case.systemout", test.SystemOut)
 	if test.Error != nil {
-		attrs.PutStr("tests.case.error", test.Error.Error())
+		span.Attributes().PutStr("tests.case.error", test.Error.Error())
 	}
 }
 

@@ -21,7 +21,7 @@ func suitesToTraces(suites []junit.Suite, e *github.WorkflowRunEvent, config *Co
 
 	logger.Info("Processing WorkflowRunEvent", zap.Int64("workflow_id", e.GetWorkflowRun().GetID()), zap.String("workflow_name", e.GetWorkflowRun().GetName()), zap.String("repo", e.GetRepo().GetFullName()))
 
-	traceID, err := generateTraceID(e.GetWorkflowRun().GetID(), e.GetWorkflowRun().GetRunAttempt())
+	traceID, err := generateTraceID(*e.WorkflowRun.ID, int(*e.WorkflowRun.RunAttempt))
 	if err != nil {
 		logger.Error("Failed to generate trace ID", zap.Error(err))
 		return ptrace.Traces{}, fmt.Errorf("failed to generate trace ID: %w", err)
@@ -29,21 +29,21 @@ func suitesToTraces(suites []junit.Suite, e *github.WorkflowRunEvent, config *Co
 
 	// NOTE: Avoid too much attributes to help with debugging the new changes. To be commented out later.
 	//createResourceAttributes(runResource, e, config)
-	createRootSpan(resourceSpans, e, traceID, logger)
+	rootSpanID, _ := createRootSpan(resourceSpans, e, traceID, logger)
 
 	for _, suite := range suites {
 		createResourceAttributesTestSuite(suiteResource, suite, config)
-
-		traceID, err := generateTraceID(*e.WorkflowRun.ID, int(*e.WorkflowRun.RunAttempt))
 		if err != nil {
 			// QUESTION: Should we return an error here?
 			logger.Error("Failed to generate trace ID", zap.Error(err))
 			return ptrace.Traces{}, fmt.Errorf("failed to generate trace ID: %w", err)
 		}
 
-		createParentSpan(scopeSpans, suite, e, traceID, logger)
+		suiteSpanID := createSuiteSpan(scopeSpans, suite, e, traceID, rootSpanID, logger)
+		logger.Debug("createParentSpan", zap.String("span-id", suiteSpanID.String()))
 
-		// TODO: create child spans for each test case
+		// NOTE: If I enable this, I will not work as expected and therefore transaction will be empty.
+		//processTests(scopeSpans, suite.Tests, e, traceID, suiteSpanID, logger)
 	}
 
 	return traces, nil
@@ -95,15 +95,14 @@ func createRootSpan(resourceSpans ptrace.ResourceSpans, event *github.WorkflowRu
 	return rootSpanID, nil
 }
 
-func createParentSpan(scopeSpans ptrace.ScopeSpans, suite junit.Suite, event *github.WorkflowRunEvent, traceID pcommon.TraceID, logger *zap.Logger) pcommon.SpanID {
+func createSuiteSpan(scopeSpans ptrace.ScopeSpans, suite junit.Suite, event *github.WorkflowRunEvent, traceID pcommon.TraceID, parentSpanID pcommon.SpanID, logger *zap.Logger) pcommon.SpanID {
 	logger.Debug("Creating parent span", zap.String("name", string(*event.WorkflowRun.Name)))
 	span := scopeSpans.Spans().AppendEmpty()
 	span.SetTraceID(traceID)
 
-	parentSpanID, _ := generateParentSpanID(*event.WorkflowRun.ID, int(*event.WorkflowRun.RunAttempt))
 	span.SetParentSpanID(parentSpanID)
 
-	jobSpanID, _ := generateJobSpanID(*event.WorkflowRun.ID, int(*event.WorkflowRun.RunAttempt), *event.GetWorkflowRun().Name)
+	jobSpanID, _ := generateJobSpanID(*event.WorkflowRun.ID, int(*event.WorkflowRun.RunAttempt), suite.Name)
 	span.SetSpanID(jobSpanID)
 
 	span.SetName(suite.Name)
@@ -127,4 +126,40 @@ func createParentSpan(scopeSpans ptrace.ScopeSpans, suite junit.Suite, event *gi
 	}
 
 	return span.SpanID()
+}
+
+func createSpan(scopeSpans ptrace.ScopeSpans, test junit.Test, event *github.WorkflowRunEvent, traceID pcommon.TraceID, parentSpanID pcommon.SpanID, logger *zap.Logger, stepNumber ...int) pcommon.SpanID {
+	logger.Debug("Processing span", zap.String("test_name", test.Name))
+	span := scopeSpans.Spans().AppendEmpty()
+	span.SetTraceID(traceID)
+	span.SetParentSpanID(parentSpanID)
+
+	var spanID pcommon.SpanID
+	createResourceAttributesTest(span, test)
+
+	span.SetSpanID(spanID)
+	// NOTE: JUnit does not provide when the test started but we can assume
+	//       it started when the workflow run started and ended by adding the duration.
+	setSpanTimes(span, event.GetWorkflowRun().GetRunStartedAt().Time, event.GetWorkflowRun().GetRunStartedAt().Time.Add(test.Duration))
+
+	span.SetName(test.Name)
+	span.SetKind(ptrace.SpanKindInternal)
+
+	// QUESTION: what status if any skipped tests?
+	switch test.Status {
+	case junit.StatusPassed:
+		span.Status().SetCode(ptrace.StatusCodeOk)
+	case junit.StatusFailed:
+		span.Status().SetCode(ptrace.StatusCodeError)
+	default:
+		span.Status().SetCode(ptrace.StatusCodeUnset)
+	}
+
+	return span.SpanID()
+}
+
+func processTests(scopeSpans ptrace.ScopeSpans, tests []junit.Test, event *github.WorkflowRunEvent, traceID pcommon.TraceID, parentSpanID pcommon.SpanID, logger *zap.Logger) {
+	for _, test := range tests {
+		createSpan(scopeSpans, test, event, traceID, parentSpanID, logger)
+	}
 }
