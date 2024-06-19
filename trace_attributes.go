@@ -12,8 +12,8 @@ import (
 
 func createResourceAttributesTestSuite(resource pcommon.Resource, suite junit.Suite, config *Config) {
 	attrs := resource.Attributes()
+	attrs.PutStr("service.name", "junit")
 	attrs.PutStr(string(semconv.CodeNamespaceKey), suite.Package)
-	attrs.PutStr("tests.suite.suitename", suite.Name)
 	attrs.PutStr("tests.suite.suitename", suite.Name)
 	attrs.PutStr("tests.suite.systemerr", suite.SystemErr)
 	attrs.PutStr("tests.suite.systemout", suite.SystemOut)
@@ -22,6 +22,7 @@ func createResourceAttributesTestSuite(resource pcommon.Resource, suite junit.Su
 
 func createResourceAttributesTest(resource pcommon.Resource, test junit.Test, config *Config) {
 	attrs := resource.Attributes()
+	attrs.PutStr("service.name", "junit")
 	attrs.PutInt("tests.case.duration", test.Duration.Milliseconds())
 	attrs.PutStr(string(semconv.CodeFunctionKey), test.Name)
 	attrs.PutStr("tests.case.classname", test.Classname)

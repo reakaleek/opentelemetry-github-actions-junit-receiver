@@ -2,7 +2,6 @@ package opentelemetrygithubactionsjunitreceiver
 
 import (
 	"fmt"
-	"time"
 
 	"github.com/google/go-github/v62/github"
 	"github.com/joshdk/go-junit"
@@ -15,7 +14,8 @@ func suitesToTraces(suites []junit.Suite, e *github.WorkflowRunEvent, config *Co
 	logger.Debug("Determining event")
 	traces := ptrace.NewTraces()
 	resourceSpans := traces.ResourceSpans().AppendEmpty()
-	runResource := resourceSpans.Resource()
+	// NOTE: Avoid too much attributes to help with debugging the new changes. To be commented out later.
+	//runResource := resourceSpans.Resource()
 	scopeSpans := resourceSpans.ScopeSpans().AppendEmpty()
 	suiteResource := resourceSpans.Resource()
 
@@ -27,7 +27,8 @@ func suitesToTraces(suites []junit.Suite, e *github.WorkflowRunEvent, config *Co
 		return ptrace.Traces{}, fmt.Errorf("failed to generate trace ID: %w", err)
 	}
 
-	createResourceAttributes(runResource, e, config)
+	// NOTE: Avoid too much attributes to help with debugging the new changes. To be commented out later.
+	//createResourceAttributes(runResource, e, config)
 	createRootSpan(resourceSpans, e, traceID, logger)
 
 	for _, suite := range suites {
@@ -65,6 +66,7 @@ func createRootSpan(resourceSpans ptrace.ResourceSpans, event *github.WorkflowRu
 	span.SetKind(ptrace.SpanKindServer)
 	setSpanTimes(span, event.GetWorkflowRun().GetRunStartedAt().Time, event.GetWorkflowRun().GetUpdatedAt().Time)
 
+	// TODO: Set status based on conclusion or base don the number of failed tests?
 	switch event.WorkflowRun.GetConclusion() {
 	case "success":
 		span.Status().SetCode(ptrace.StatusCodeOk)
@@ -104,11 +106,12 @@ func createParentSpan(scopeSpans ptrace.ScopeSpans, suite junit.Suite, event *gi
 	jobSpanID, _ := generateJobSpanID(*event.WorkflowRun.ID, int(*event.WorkflowRun.RunAttempt), *event.GetWorkflowRun().Name)
 	span.SetSpanID(jobSpanID)
 
-	span.SetName(string(*event.WorkflowRun.Name))
+	span.SetName(suite.Name)
 	span.SetKind(ptrace.SpanKindInternal)
 
-	// TODO: set span time
-	setSpanTimes(span, event.GetWorkflowRun().GetRunStartedAt().Time, event.GetWorkflowRun().GetUpdatedAt().Time)
+	// NOTE: JUnit does not provide when the test started but we can assume
+	//       it started when the workflow run started and ended by adding the duration.
+	setSpanTimes(span, event.GetWorkflowRun().GetRunStartedAt().Time, event.GetWorkflowRun().GetRunStartedAt().Time.Add(suite.Totals.Duration))
 
 	anyFailure := false
 	for _, test := range suite.Tests {
@@ -124,9 +127,4 @@ func createParentSpan(scopeSpans ptrace.ScopeSpans, suite junit.Suite, event *gi
 	}
 
 	return span.SpanID()
-}
-
-func setSpanTimes(span ptrace.Span, start, end time.Time) {
-	span.SetStartTimestamp(pcommon.NewTimestampFromTime(start))
-	span.SetEndTimestamp(pcommon.NewTimestampFromTime(end))
 }

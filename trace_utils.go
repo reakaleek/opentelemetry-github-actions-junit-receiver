@@ -5,9 +5,11 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/google/go-github/v62/github"
 	"go.opentelemetry.io/collector/pdata/pcommon"
+	"go.opentelemetry.io/collector/pdata/ptrace"
 )
 
 func checkDuplicateStepNames(steps []*github.TaskStep) map[string]int {
@@ -87,6 +89,11 @@ func generateStepSpanID(runID int64, runAttempt int, jobName, stepName string, s
 	}
 
 	return spanID, nil
+}
+
+func setSpanTimes(span ptrace.Span, start, end time.Time) {
+	span.SetStartTimestamp(pcommon.NewTimestampFromTime(start))
+	span.SetEndTimestamp(pcommon.NewTimestampFromTime(end))
 }
 
 func transformGitHubAPIURL(apiURL string) string {
