@@ -90,7 +90,7 @@ func (rec *githubactionsjunitReceiver) handleEvent(w http.ResponseWriter, r *htt
 		rec.handleWorkflowRunEvent(event, w, r, nil)
 	default:
 		{
-			rec.logger.Debug("Skipping the request because it is not a workflow_job event", zap.Any("event", event))
+			rec.logger.Debug("Skipping the request because it is not a workflow_run event")
 			w.WriteHeader(http.StatusOK)
 		}
 	}
@@ -99,7 +99,7 @@ func (rec *githubactionsjunitReceiver) handleEvent(w http.ResponseWriter, r *htt
 func (rec *githubactionsjunitReceiver) handleWorkflowRunEvent(workflowRunEvent *github.WorkflowRunEvent, w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 	rec.logger.Debug("Handling workflow run event", zap.Int64("workflow_run.id", workflowRunEvent.WorkflowRun.GetWorkflowID()))
 	if workflowRunEvent.GetAction() != "completed" {
-		rec.logger.Debug("Skipping the request because it is not a completed workflow_job event", zap.Any("event", workflowRunEvent))
+		rec.logger.Debug("Skipping the request because it is not a completed workflow_job event", zap.String("action", workflowRunEvent.GetAction()))
 		w.WriteHeader(http.StatusOK)
 		return
 	}
