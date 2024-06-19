@@ -7,6 +7,7 @@
 
 - [Go](https://golang.org/dl/)
 - [Gh](https://cli.github.com/)
+- [Docker](https://docs.docker.com/get-docker/)
 
 ### Install tools
 
@@ -54,6 +55,13 @@ Copy the `ngrok` URL and go to your GitHub repository, in this case we use `elas
     * Workflow jobs
 
 <img src="./docs/images/webhook.png" width="512"/>
+
+
+### Start Jaeger
+
+```shell
+docker compose up
+```
 
 ### Run the collector
 

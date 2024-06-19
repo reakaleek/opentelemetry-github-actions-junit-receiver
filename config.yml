@@ -20,6 +20,10 @@ exporters:
     verbosity: basic
   file:
     path: /tmp/logs.txt
+  otlp:
+    endpoint: "localhost:4317"
+    tls:
+      insecure: true
 
 service:
   extensions: [zpages, pprof]
@@ -27,7 +31,7 @@ service:
     traces:
       receivers: [githubactionsjunit]
       processors: [batch]
-      exporters: [debug, file]
+      exporters: [debug, file, otlp]
   telemetry:
     logs:
       level: debug
