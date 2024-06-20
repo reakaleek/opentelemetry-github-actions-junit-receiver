@@ -5,21 +5,21 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
-	"os"
-	"path/filepath"
-	"strings"
-
 	"github.com/google/go-github/v62/github"
 	"github.com/joshdk/go-junit"
 	"github.com/julienschmidt/httprouter"
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/consumer"
+	"go.opentelemetry.io/collector/pdata/pcommon"
+	"go.opentelemetry.io/collector/pdata/ptrace"
 	"go.opentelemetry.io/collector/receiver"
-	"go.opentelemetry.io/otel/attribute"
-	semconv "go.opentelemetry.io/otel/semconv/v1.4.0"
 	"go.uber.org/zap"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
 )
 
 func newTracesReceiver(cfg *Config, params receiver.CreateSettings, nextConsumer consumer.Traces) (receiver.Traces, error) {
@@ -30,19 +30,21 @@ func newTracesReceiver(cfg *Config, params receiver.CreateSettings, nextConsumer
 	}
 	params.Logger.Info("GitHub API rate limit", zap.Int("limit", rateLimit.GetCore().Limit), zap.Int("remaining", rateLimit.GetCore().Remaining), zap.Time("reset", rateLimit.GetCore().Reset.Time))
 	return &githubactionsjunitReceiver{
-		config:   cfg,
-		settings: params,
-		logger:   params.Logger,
-		ghClient: ghClient,
+		nextConsumer: nextConsumer,
+		config:       cfg,
+		settings:     params,
+		logger:       params.Logger,
+		ghClient:     ghClient,
 	}, nil
 }
 
 type githubactionsjunitReceiver struct {
-	config   *Config
-	server   *http.Server
-	settings receiver.CreateSettings
-	logger   *zap.Logger
-	ghClient *github.Client
+	nextConsumer consumer.Traces
+	config       *Config
+	server       *http.Server
+	settings     receiver.CreateSettings
+	logger       *zap.Logger
+	ghClient     *github.Client
 }
 
 func (rec *githubactionsjunitReceiver) Start(ctx context.Context, host component.Host) error {
@@ -90,7 +92,7 @@ func (rec *githubactionsjunitReceiver) handleEvent(w http.ResponseWriter, r *htt
 		rec.handleWorkflowRunEvent(event, w, r, nil)
 	default:
 		{
-			rec.logger.Debug("Skipping the request because it is not a workflow_job event", zap.Any("event", event))
+			rec.logger.Debug("Skipping the request because it is not a workflow_run event")
 			w.WriteHeader(http.StatusOK)
 		}
 	}
@@ -99,7 +101,7 @@ func (rec *githubactionsjunitReceiver) handleEvent(w http.ResponseWriter, r *htt
 func (rec *githubactionsjunitReceiver) handleWorkflowRunEvent(workflowRunEvent *github.WorkflowRunEvent, w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 	rec.logger.Debug("Handling workflow run event", zap.Int64("workflow_run.id", workflowRunEvent.WorkflowRun.GetWorkflowID()))
 	if workflowRunEvent.GetAction() != "completed" {
-		rec.logger.Debug("Skipping the request because it is not a completed workflow_job event", zap.Any("event", workflowRunEvent))
+		rec.logger.Debug("Skipping the request because it is not a completed workflow_job event", zap.String("action", workflowRunEvent.GetAction()))
 		w.WriteHeader(http.StatusOK)
 		return
 	}
@@ -121,30 +123,99 @@ func (rec *githubactionsjunitReceiver) handleWorkflowRunEvent(workflowRunEvent *
 		w.WriteHeader(http.StatusOK)
 		return
 	}
+
+	traces := ptrace.NewTraces()
+	resourceSpans := traces.ResourceSpans().AppendEmpty()
+	resource := resourceSpans.Resource()
+	scopeSpans := resourceSpans.ScopeSpans().AppendEmpty()
+	rootSpan := scopeSpans.Spans().AppendEmpty()
+	rootSpan.SetName(workflowRunEvent.GetWorkflowRun().GetName())
+	rootSpan.SetKind(ptrace.SpanKindServer)
+	startTimestamp := workflowRunEvent.GetWorkflowRun().GetCreatedAt().Time
+	rootSpan.SetStartTimestamp(pcommon.NewTimestampFromTime(startTimestamp))
+	rootSpan.SetEndTimestamp(pcommon.NewTimestampFromTime(workflowRunEvent.GetWorkflowRun().GetUpdatedAt().Time))
+	traceId, err := generateTraceID(workflowRunEvent.GetWorkflowRun().GetID(), int(workflowRunEvent.GetWorkflowRun().GetRunAttempt()))
+	createResourceAttributes(resource, workflowRunEvent, rec.config)
+
+	if err != nil {
+		rec.logger.Error("Failed to generate trace ID", zap.Error(err))
+		w.WriteHeader(http.StatusInternalServerError)
+	}
+	rootSpan.SetTraceID(traceId)
+
 	for _, artifact := range junitArtifacts {
-		err := processArtifact(rec.logger, rec.ghClient, workflowRunEvent, artifact)
+		err := processArtifact(rec.logger, rec.ghClient, rec.config, workflowRunEvent, artifact, rootSpan, scopeSpans, startTimestamp, traces)
 		if err != nil {
 			// TODO: report error but keep processing other artifacts
 			rec.logger.Error("Failed to process artifact", zap.Error(err))
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
-
 	}
+
+	err = rec.nextConsumer.ConsumeTraces(r.Context(), traces)
+	if err != nil {
+		rec.logger.Error("Failed to process traces", zap.Error(err))
+		w.WriteHeader(http.StatusInternalServerError)
+	}
+	w.WriteHeader(http.StatusOK)
 }
 
-func processArtifact(logger *zap.Logger, ghClient *github.Client, workflowRunEvent *github.WorkflowRunEvent, artifact *github.Artifact) error {
+func processArtifact(logger *zap.Logger, ghClient *github.Client, config *Config, workflowRunEvent *github.WorkflowRunEvent, artifact *github.Artifact, rootSpan ptrace.Span, scopeSpans ptrace.ScopeSpans, startTimestamp time.Time, traces ptrace.Traces) error {
 	zipFile, err := downloadArtifact(context.Background(), ghClient, workflowRunEvent, artifact)
 	if err != nil {
 		return err
 	}
 	defer zipFile.Close()
+
+	spanId, err := generateParentSpanID(workflowRunEvent.GetWorkflowRun().GetID(), workflowRunEvent.GetWorkflowRun().GetRunAttempt())
+	if err != nil {
+		logger.Error("Failed to generate parent span ID", zap.Error(err))
+		return fmt.Errorf("failed to generate parent span ID: %w", err)
+	}
+	rootSpan.SetSpanID(spanId)
+
+	artifactSpan := scopeSpans.Spans().AppendEmpty()
+	artifactSpan.SetName(artifact.GetName())
+	artifactSpan.SetKind(ptrace.SpanKindInternal)
+	artifactSpan.SetParentSpanID(rootSpan.SpanID())
+	artifactSpan.SetTraceID(rootSpan.TraceID())
+	artifactSpan.SetSpanID(NewSpanID())
+	artifactSpan.SetStartTimestamp(pcommon.NewTimestampFromTime(startTimestamp))
+
+	var maxDuration time.Duration = 0
+
 	for _, file := range zipFile.Reader.File {
 		logger.Debug("Processing file", zap.String("artifact", artifact.GetName()), zap.String("file", file.Name))
 		suites := processJunitFile(file, logger)
 		for _, suite := range suites {
-			processSuite(suite, logger)
+			if suite.Totals.Duration > maxDuration {
+				maxDuration = suite.Totals.Duration
+			}
 		}
+		artifactSpan.SetEndTimestamp(pcommon.NewTimestampFromTime(startTimestamp.Add(maxDuration)))
+
+		// Convert the Test Suites to OpenTelemetry traces
+		//td, err := suitesToTraces(suites, workflowRunEvent, config, logger)
+		convertSuiteToTraces(suites, startTimestamp, scopeSpans, artifactSpan)
+		if err != nil {
+			logger.Debug("Failed to convert event to traces", zap.Error(err))
+			// Move forward with the next file
+		}
+
+		//// Check if the traces data contains any ResourceSpans
+		//if td.ResourceSpans().Len() > 0 {
+		//	spanCount := td.SpanCount()
+		//	logger.Debug("Unmarshaled spans", zap.Int("#spans", spanCount))
+		//	td.ResourceSpans()
+		//
+		//	consumerErr := nextConsumer.ConsumeTraces(ctx, td)
+		//	if consumerErr != nil {
+		//		logger.Debug("Failed to process traces", zap.Error(consumerErr))
+		//	}
+		//} else {
+		//	logger.Debug("No spans to unmarshal or traces not initialized")
+		//}
 	}
 	return nil
 }
@@ -173,55 +244,6 @@ func processJunitFile(file *zip.File, logger *zap.Logger) []junit.Suite {
 		logger.Error("Failed to ingest JUnit file", zap.Error(err))
 	}
 	return suites
-}
-
-func processSuite(suite junit.Suite, logger *zap.Logger) {
-
-	// Set up the attributes for the suite
-	suiteAttributes := []attribute.KeyValue{
-		semconv.CodeNamespaceKey.String(suite.Package),
-		attribute.Key(TestsSuiteName).String(suite.Name),
-		attribute.Key(TestsSystemErr).String(suite.SystemErr),
-		attribute.Key(TestsSystemOut).String(suite.SystemOut),
-		attribute.Key(TestsDuration).Int64(suite.Totals.Duration.Milliseconds()),
-	}
-
-	// Add suite properties as labels
-	suiteAttributes = append(suiteAttributes, propsToLabels(suite.Properties)...)
-
-	// For each test in the suite, set up the attributes
-	for _, test := range suite.Tests {
-		testAttributes := []attribute.KeyValue{
-			semconv.CodeFunctionKey.String(test.Name),
-			attribute.Key(TestDuration).Int64(test.Duration.Milliseconds()),
-			attribute.Key(TestClassName).String(test.Classname),
-			attribute.Key(TestMessage).String(test.Message),
-			attribute.Key(TestStatus).String(string(test.Status)),
-			attribute.Key(TestSystemErr).String(test.SystemErr),
-			attribute.Key(TestSystemOut).String(test.SystemOut),
-		}
-
-		testAttributes = append(testAttributes, propsToLabels(test.Properties)...)
-		testAttributes = append(testAttributes, suiteAttributes...)
-
-		if test.Error != nil {
-			testAttributes = append(testAttributes, attribute.Key(TestError).String(test.Error.Error()))
-		}
-		var stringSlice []string
-		for _, attr := range testAttributes {
-			stringSlice = append(stringSlice, fmt.Sprintf("%s: %v", attr.Key, attr.Value.AsString()))
-		}
-		logger.Debug("Processing test suite", zap.Strings("attributes", stringSlice))
-	}
-}
-
-func propsToLabels(props map[string]string) []attribute.KeyValue {
-	attributes := []attribute.KeyValue{}
-	for k, v := range props {
-		attributes = append(attributes, attribute.Key(k).String(v))
-	}
-
-	return attributes
 }
 
 func getArtifacts(ctx context.Context, ghEvent *github.WorkflowRunEvent, ghClient *github.Client) ([]*github.Artifact, error) {
