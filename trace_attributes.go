@@ -11,8 +11,8 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.25.0"
 )
 
-func createResourceAttributesTestSuite(resource pcommon.Resource, suite junit.Suite, config *Config) {
-	attrs := resource.Attributes()
+func createResourceAttributesTestSuite(span ptrace.Span, suite junit.Suite) {
+	attrs := span.Attributes()
 	attrs.PutStr("service.name", "junit")
 	attrs.PutStr(string(semconv.CodeNamespaceKey), suite.Package)
 	attrs.PutStr("tests.suite.suitename", suite.Name)
