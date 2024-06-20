@@ -17,7 +17,7 @@ func suitesToTraces(suites []junit.Suite, e *github.WorkflowRunEvent, config *Co
 	// NOTE: Avoid too much attributes to help with debugging the new changes. To be commented out later.
 	//runResource := resourceSpans.Resource()
 	scopeSpans := resourceSpans.ScopeSpans().AppendEmpty()
-	suiteResource := resourceSpans.Resource()
+	//suiteResource := resourceSpans.Resource()
 
 	logger.Info("Processing WorkflowRunEvent", zap.Int64("workflow_id", e.GetWorkflowRun().GetID()), zap.String("workflow_name", e.GetWorkflowRun().GetName()), zap.String("repo", e.GetRepo().GetFullName()))
 
@@ -32,7 +32,7 @@ func suitesToTraces(suites []junit.Suite, e *github.WorkflowRunEvent, config *Co
 	rootSpanID, _ := createRootSpan(resourceSpans, e, traceID, logger)
 
 	for _, suite := range suites {
-		createResourceAttributesTestSuite(suiteResource, suite, config)
+		//createResourceAttributesTestSuite(suiteResource, suite, config)
 		if err != nil {
 			// QUESTION: Should we return an error here?
 			logger.Error("Failed to generate trace ID", zap.Error(err))

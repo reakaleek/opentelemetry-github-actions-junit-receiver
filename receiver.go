@@ -5,19 +5,21 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
-	"os"
-	"path/filepath"
-	"strings"
-
 	"github.com/google/go-github/v62/github"
 	"github.com/joshdk/go-junit"
 	"github.com/julienschmidt/httprouter"
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/consumer"
+	"go.opentelemetry.io/collector/pdata/pcommon"
+	"go.opentelemetry.io/collector/pdata/ptrace"
 	"go.opentelemetry.io/collector/receiver"
 	"go.uber.org/zap"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
 )
 
 func newTracesReceiver(cfg *Config, params receiver.CreateSettings, nextConsumer consumer.Traces) (receiver.Traces, error) {
@@ -121,48 +123,99 @@ func (rec *githubactionsjunitReceiver) handleWorkflowRunEvent(workflowRunEvent *
 		w.WriteHeader(http.StatusOK)
 		return
 	}
+
+	traces := ptrace.NewTraces()
+	resourceSpans := traces.ResourceSpans().AppendEmpty()
+	resource := resourceSpans.Resource()
+	scopeSpans := resourceSpans.ScopeSpans().AppendEmpty()
+	rootSpan := scopeSpans.Spans().AppendEmpty()
+	rootSpan.SetName(workflowRunEvent.GetWorkflowRun().GetName())
+	rootSpan.SetKind(ptrace.SpanKindServer)
+	startTimestamp := workflowRunEvent.GetWorkflowRun().GetCreatedAt().Time
+	rootSpan.SetStartTimestamp(pcommon.NewTimestampFromTime(startTimestamp))
+	rootSpan.SetEndTimestamp(pcommon.NewTimestampFromTime(workflowRunEvent.GetWorkflowRun().GetUpdatedAt().Time))
+	traceId, err := generateTraceID(workflowRunEvent.GetWorkflowRun().GetID(), int(workflowRunEvent.GetWorkflowRun().GetRunAttempt()))
+	createResourceAttributes(resource, workflowRunEvent, rec.config)
+
+	if err != nil {
+		rec.logger.Error("Failed to generate trace ID", zap.Error(err))
+		w.WriteHeader(http.StatusInternalServerError)
+	}
+	rootSpan.SetTraceID(traceId)
+
 	for _, artifact := range junitArtifacts {
-		err := processArtifact(rec.logger, rec.ghClient, rec.config, workflowRunEvent, artifact, r.Context(), rec.nextConsumer)
+		err := processArtifact(rec.logger, rec.ghClient, rec.config, workflowRunEvent, artifact, rootSpan, scopeSpans, startTimestamp, traces)
 		if err != nil {
 			// TODO: report error but keep processing other artifacts
 			rec.logger.Error("Failed to process artifact", zap.Error(err))
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
-
 	}
+
+	err = rec.nextConsumer.ConsumeTraces(r.Context(), traces)
+	if err != nil {
+		rec.logger.Error("Failed to process traces", zap.Error(err))
+		w.WriteHeader(http.StatusInternalServerError)
+	}
+	w.WriteHeader(http.StatusOK)
 }
 
-func processArtifact(logger *zap.Logger, ghClient *github.Client, config *Config, workflowRunEvent *github.WorkflowRunEvent, artifact *github.Artifact, ctx context.Context, nextConsumer consumer.Traces) error {
+func processArtifact(logger *zap.Logger, ghClient *github.Client, config *Config, workflowRunEvent *github.WorkflowRunEvent, artifact *github.Artifact, rootSpan ptrace.Span, scopeSpans ptrace.ScopeSpans, startTimestamp time.Time, traces ptrace.Traces) error {
 	zipFile, err := downloadArtifact(context.Background(), ghClient, workflowRunEvent, artifact)
 	if err != nil {
 		return err
 	}
 	defer zipFile.Close()
+
+	spanId, err := generateParentSpanID(workflowRunEvent.GetWorkflowRun().GetID(), workflowRunEvent.GetWorkflowRun().GetRunAttempt())
+	if err != nil {
+		logger.Error("Failed to generate parent span ID", zap.Error(err))
+		return fmt.Errorf("failed to generate parent span ID: %w", err)
+	}
+	rootSpan.SetSpanID(spanId)
+
+	artifactSpan := scopeSpans.Spans().AppendEmpty()
+	artifactSpan.SetName(artifact.GetName())
+	artifactSpan.SetKind(ptrace.SpanKindInternal)
+	artifactSpan.SetParentSpanID(rootSpan.SpanID())
+	artifactSpan.SetTraceID(rootSpan.TraceID())
+	artifactSpan.SetSpanID(NewSpanID())
+	artifactSpan.SetStartTimestamp(pcommon.NewTimestampFromTime(startTimestamp))
+
+	var maxDuration time.Duration = 0
+
 	for _, file := range zipFile.Reader.File {
 		logger.Debug("Processing file", zap.String("artifact", artifact.GetName()), zap.String("file", file.Name))
 		suites := processJunitFile(file, logger)
+		for _, suite := range suites {
+			if suite.Totals.Duration > maxDuration {
+				maxDuration = suite.Totals.Duration
+			}
+		}
+		artifactSpan.SetEndTimestamp(pcommon.NewTimestampFromTime(startTimestamp.Add(maxDuration)))
 
 		// Convert the Test Suites to OpenTelemetry traces
-		td, err := suitesToTraces(suites, workflowRunEvent, config, logger)
+		//td, err := suitesToTraces(suites, workflowRunEvent, config, logger)
+		convertSuiteToTraces(suites, startTimestamp, scopeSpans, artifactSpan)
 		if err != nil {
 			logger.Debug("Failed to convert event to traces", zap.Error(err))
 			// Move forward with the next file
 		}
 
-		// Check if the traces data contains any ResourceSpans
-		if td.ResourceSpans().Len() > 0 {
-			spanCount := td.SpanCount()
-			logger.Debug("Unmarshaled spans", zap.Int("#spans", spanCount))
-			td.ResourceSpans()
-
-			consumerErr := nextConsumer.ConsumeTraces(ctx, td)
-			if consumerErr != nil {
-				logger.Debug("Failed to process traces", zap.Error(consumerErr))
-			}
-		} else {
-			logger.Debug("No spans to unmarshal or traces not initialized")
-		}
+		//// Check if the traces data contains any ResourceSpans
+		//if td.ResourceSpans().Len() > 0 {
+		//	spanCount := td.SpanCount()
+		//	logger.Debug("Unmarshaled spans", zap.Int("#spans", spanCount))
+		//	td.ResourceSpans()
+		//
+		//	consumerErr := nextConsumer.ConsumeTraces(ctx, td)
+		//	if consumerErr != nil {
+		//		logger.Debug("Failed to process traces", zap.Error(consumerErr))
+		//	}
+		//} else {
+		//	logger.Debug("No spans to unmarshal or traces not initialized")
+		//}
 	}
 	return nil
 }
